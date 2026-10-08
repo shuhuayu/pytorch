@@ -2175,23 +2175,34 @@ class TestFullyShardReduceOpWorldSize1(FSDPTestContinuous):
         return 1
 
     @parametrize("divide_factor", [None, 1.0, 2.0])
-    def test_singleton_copy_division(self, divide_factor):
+    def test_singleton_reduce_reuses_input(self, divide_factor):
         divisions = []
+
+        class CountingReduceScatter(DefaultReduceScatter):
+            def __init__(self):
+                self.num_allocations = 0
+
+            def allocate(self, *args, **kwargs):
+                self.num_allocations += 1
+                return super().allocate(*args, **kwargs)
 
         class RecordDivisions(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                if func == torch.ops.aten.div.Tensor:
+                if func in (torch.ops.aten.div.Tensor, torch.ops.aten.div_.Tensor):
                     divisions.append(func)
                 return func(*args, **(kwargs or {}))
 
         model = nn.Linear(8, 4, bias=False, device=device_type)
         fully_shard(model, mesh=init_device_mesh(device_type.type, (1,)))
+        comm = CountingReduceScatter()
+        model.set_custom_reduce_scatter(comm)
         if divide_factor is not None:
             model.set_gradient_divide_factor(divide_factor)
         inp = torch.ones(3, 8, device=device_type)
         loss = model(inp).sum()
         with RecordDivisions():
             loss.backward()
+        self.assertEqual(comm.num_allocations, 1)
         self.assertEqual(len(divisions), int(divide_factor not in (None, 1)))
         expected = torch.full_like(inp[:1].expand(4, -1), 3 / (divide_factor or 1))
         self.assertEqual(model.weight.grad.to_local(), expected)

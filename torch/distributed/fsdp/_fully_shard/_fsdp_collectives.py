@@ -671,13 +671,13 @@ def foreach_reduce(
     all_reduce_event = None
 
     with device_handle.stream(reduce_scatter_stream):
-        reduce_output = reduce_scatter_comm.allocate(
-            (reduce_scatter_output_numel,),
-            dtype=reduce_dtype,
-            device=device,
-        )
         _div_if_needed(reduce_scatter_input, predivide_factor)
         if world_size > 1:
+            reduce_output = reduce_scatter_comm.allocate(
+                (reduce_scatter_output_numel,),
+                dtype=reduce_dtype,
+                device=device,
+            )
             reduce_scatter_comm(
                 output_tensor=reduce_output,
                 input_tensor=reduce_scatter_input,
@@ -685,12 +685,12 @@ def foreach_reduce(
                 op=reduce_scatter_op,
             )
         else:
-            # For single GPU, just copy the input to output (no actual reduce-scatter needed), and
-            # account for a possible gradient_divide_factor.
+            # No collective runs for a singleton group, so the packed input is
+            # already the final reduction output. Reuse its storage instead of
+            # allocating and copying an equally sized output buffer.
+            reduce_output = reduce_scatter_input
             if gradient_divide_factor is not None and gradient_divide_factor != 1.0:
-                reduce_output.copy_(reduce_scatter_input / gradient_divide_factor)
-            else:
-                reduce_output.copy_(reduce_scatter_input)
+                reduce_output.div_(gradient_divide_factor)
         reduce_scatter_event = reduce_scatter_stream.record_event()
         post_reduce_stream = reduce_scatter_stream
         if all_reduce_group is not None:  # HSDP or DDP/replicate
